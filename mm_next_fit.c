@@ -81,6 +81,9 @@ team_t team = {
 /* 처음에 쓸 가용 블록 힙 */
 static char *heap_listp;
 
+/* next_fit 이전 검색 종료 지점 저장용 변수 */
+void *prev_bp;
+
 /* case 1~4의 경우에 따른 coalesce */
 static void *coalesce(void *bp)
 {
@@ -92,6 +95,7 @@ static void *coalesce(void *bp)
     /* case 1 */
     if (prev_alloc && next_alloc)
     {
+        prev_bp = bp;
         return bp;
     }
     /* case 2 */
@@ -117,6 +121,7 @@ static void *coalesce(void *bp)
         PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
         bp = PREV_BLKP(bp);
     }
+    prev_bp = bp;
     return bp;
 }
 
@@ -158,6 +163,7 @@ int mm_init(void)
     PUT(heap_listp + (2 * WSIZE), PACK(DSIZE, 1)); /* 프롤로그 풋터 */
     PUT(heap_listp + (3 * WSIZE), PACK(0, 1));     /* 에필로그 헤더 */
     heap_listp += (2 * WSIZE);
+    prev_bp = heap_listp;
 
     /* CHUNKSIZE/WSIZE 만큼 빈 힙을 확장 */
     if (extend_heap(CHUNKSIZE / WSIZE) == NULL)
@@ -170,11 +176,19 @@ int mm_init(void)
 /*
  * 할당할 사이즈에 맞는 가용 블록을 찾는 함수
  */
-static void *find_fit(size_t asize)
+static void *find_next_fit(size_t asize)
 {
-    /* first fit */
+    /* next fit */
     void *bp;
-    for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp))
+    for (bp = prev_bp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp))
+    {
+        if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp))))
+        {
+            return bp;
+        }
+    }
+    /* 다음 블록에서부터 탐색했을 때 없었다면, 다시 처음부터 prev_bp 전까지 탐색 */
+    for (bp = heap_listp; bp != prev_bp && GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp))
     {
         if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp))))
         {
@@ -215,16 +229,6 @@ static void place(void *bp, size_t asize)
  */
 void *mm_malloc(size_t size)
 {
-    /* 원래 있던 ver. */
-    /* int newsize = ALIGN(size + SIZE_T_SIZE);
-    void *p = mem_sbrk(newsize);
-    if (p == (void *)-1)
-    return NULL;
-    else {
-        *(size_t *)p = size;
-        return (void *)((char *)p + SIZE_T_SIZE);
-    } */
-
     size_t asize;      /* 할당된 블록 사이즈 */
     size_t extendsize; /* 맞는 블록이 없으면 힙에 추가로 요청할 사이즈 */
     char *bp;
@@ -248,7 +252,7 @@ void *mm_malloc(size_t size)
     }
 
     /* 맞는 가용 블록 찾기 */
-    if ((bp = find_fit(asize)) != NULL)
+    if ((bp = find_next_fit(asize)) != NULL)
     {
         place(bp, asize);
         return bp;
@@ -299,38 +303,4 @@ void *mm_realloc(void *bp, size_t size)
     memcpy(newptr, oldptr, copySize);
     mm_free(oldptr);
     return newptr;
-
-    // void *oldptr = bp;
-
-    // /* 요청 사이즈 <= 0 이면 반환을 해도 되니까 반환한다. */
-    // if (size == 0) /* 이게 음수로 들어오는 경우는 왜? */
-    // {
-    //     mm_free(oldptr);
-    //     return 0;
-    // }
-    // /* 기존 메모리의 포인터가 아직 할당 전이면
-    //  * malloc과 동일하다. */
-    // if (oldptr == NULL)
-    // {
-    //     return mm_malloc(size);
-    // }
-
-    // /* 힙 사이즈가 충분하지 않아서 재할당이 불가능하면 */
-    // void *newptr = mm_malloc(size);
-    // if (newptr == NULL)
-    // {
-    //     return 0;
-    // }
-
-    // /* 재할당 시작 */
-    // size_t copySize = GET_SIZE(HDRP(oldptr));
-    // if (size < copySize) /* 재할당할 size가 원래보다 더 작으면 */
-    // {
-    //     copySize = size; /* 이전 사이즈를 재할당할 사이즈로 줄임. 나머지는 free될 예정 */
-    // }
-    // /* memcpy(dest, source, num)
-    //  * source의 메모리에 있는 값들을 num 길이만큼 dest에 복사해서 붙여넣는다. */
-    // memcpy(newptr, oldptr, copySize);
-    // mm_free(oldptr);
-    // return newptr;
 }
