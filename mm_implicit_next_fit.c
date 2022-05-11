@@ -33,16 +33,17 @@ team_t team = {
     "",
     /* Second member's email address (leave blank if none) */
     ""};
-
+    
 /*
  * 기본 상수와 매크로
  */
-/* 기본 단위 - word, double word, 새로 할당받는 힙의 크기 CHUNKSIZE 정의 */
+
+/* 기본 단위 - word, double word, 새로 할당받는 힙의 크기 CHUNKSIZE, 최소 블록 크기 정의 */
 #define WSIZE 4                 // 워드, 헤더/푸터 사이즈 (bytes)
 #define DSIZE 8                 // 더블워드 사이즈 (bytes)
 #define CHUNKSIZE (1 << 12)     // 힙 사이즈 확장 크기 기준 : 4,096bytes -> 4KB
 
-#define MAX(x, y) ((x) > (y) ? (x) : (y))
+#define MAX(x, y) ((x) > (y) ? (x) : (y)) /* 왜 괄호치는지 알아보기 */
 
 /* header 및 footer 값(size + allocated) 리턴 */
 #define PACK(size, alloc) ((size) | (alloc))
@@ -56,25 +57,27 @@ team_t team = {
 #define GET_ALLOC(p) (GET(p) & 0x1)     // 0x1과 곱해서 끝 자리가 여전히 1이라면 allocated
 
 /* 블록 포인터 bp를 인자로 받아 블록의 header와 footer의 주소 반환 */
-#define HDRP(bp) ((char *)(bp) - WSIZE)
+#define HDRP(bp) ((char *)(bp)-WSIZE)
 #define FTRP(bp) ((char *)(bp) + GET_SIZE(HDRP(bp)) - DSIZE)
 
-/* 블록 포인터 bp를 인자로 받아 이후, 이전 블록의 주소 리턴 */
-#define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char *)(bp)-WSIZE))) // (char*)(bp) + GET_SIZE(지금 블록의 헤더값)
-#define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE(((char *)(bp)-DSIZE)))   // (char*)(bp) - GET_SIZE(이전 블록의 풋터값)
+/* Free List 상에서의 이전, 이후 블록의 포인터 리턴 */
+#define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char *)(bp)-WSIZE)))
+#define PREV_BLKP(bp) ((char *)(bp)-GET_SIZE(((char *)(bp)-DSIZE)))
 
 /* global variable & functions */
 static char *heap_listp;
+void *prev_bp; // next_fit 이전 검색 종료 지점 저장용 변수
 
 static void *extend_heap(size_t);
 static void *coalesce(void *);
-static void *find_fit(size_t);
+static void *find_next_fit(size_t);
 static void place(void *, size_t);
 
 int mm_init(void);
 void *mm_malloc(size_t);
 void mm_free(void *);
 void *mm_realloc(void *, size_t);
+
 
 /*
  * mm_init : 4 words 사이즈의 free 리스트를 초기화하고, 초기 free 블록 생성
@@ -87,11 +90,12 @@ int mm_init(void)
     {
         return -1;
     }
-    PUT(heap_listp, 0);                             // unused padding
-    PUT(heap_listp + (1 * WSIZE), PACK(DSIZE, 1));  // prologue hdr
-    PUT(heap_listp + (2 * WSIZE), PACK(DSIZE, 1));  // prologue ftr
-    PUT(heap_listp + (3 * WSIZE), PACK(0, 1));      // epliogue hdr
+    PUT(heap_listp, 0);                            // unused padding
+    PUT(heap_listp + (1 * WSIZE), PACK(DSIZE, 1)); // prologue hdr
+    PUT(heap_listp + (2 * WSIZE), PACK(DSIZE, 1)); // prologue ftr
+    PUT(heap_listp + (3 * WSIZE), PACK(0, 1));     // epliogue hdr
     heap_listp += (2 * WSIZE);
+    prev_bp = heap_listp;
 
     // 그 후 CHUNKSIZE만큼 힙을 확장해 초기 가용 블록 생성
     if (extend_heap(CHUNKSIZE / WSIZE) == NULL)
@@ -150,8 +154,8 @@ void *mm_malloc(size_t size)
         asize = DSIZE * ((size + (DSIZE) + (DSIZE - 1)) / DSIZE);
     }
 
-    // 사이즈 맞는 가용 블록 찾기 (first fit)
-    if ((bp = find_fit(asize)) != NULL)
+    // 사이즈 맞는 가용 블록 찾기 (next fit)
+    if ((bp = find_next_fit(asize)) != NULL)
     {
         place(bp, asize);
         return bp;
@@ -192,14 +196,22 @@ void *mm_realloc(void *bp, size_t size)
 }
 
 /*
- * find_fit(size) : 힙의 맨 처음부터 탐색, 제일 처음 발견된 요구하는 메모리 공간보다 큰 가용 블록의 주소를 반환한다.
+ * find_next_fit(size) : 지난 탐색 종료 블록부터 탐색, 제일 처음 발견된 요구하는 메모리 공간보다 큰 가용 블록의 주소를 반환한다.
  */
-static void *find_fit(size_t asize)
+static void *find_next_fit(size_t asize)
 {
-    // first fit
     void *bp;
-    for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp))
-    {   
+    // next fit
+    for (bp = prev_bp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp))
+    {
+        if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp))))
+        {
+            return bp;
+        }
+    }
+    // 다음 블록에서부터 탐색했을 때 없었다면, 다시 처음부터 prev_bp 전까지 탐색
+    for (bp = heap_listp; bp != prev_bp && GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp))
+    {
         if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp))))
         {
             return bp;
@@ -257,7 +269,7 @@ static void *coalesce(void *bp)
     // 이전,다음 블록의 가용 여부에 따라 4가지 케이스로 나누어 coalesce를 진행한다.
     size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp))); // 직전 블록 가용 여부
     size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp))); // 직후 블록 가용 여부
-    size_t size = GET_SIZE(HDRP(bp)); 
+    size_t size = GET_SIZE(HDRP(bp));
 
     // case 2 : 직전 allocated, 직후 free
     if (prev_alloc && !next_alloc)
@@ -283,6 +295,7 @@ static void *coalesce(void *bp)
         bp = PREV_BLKP(bp);
     }
     // case 1 : 직전, 직후 모두 allocated
-    // case 2-4 포인터 반환
+    // case 2-4 포인터 반환    
+    prev_bp = bp;
     return bp;
 }
